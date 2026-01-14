@@ -201,14 +201,11 @@ export const generateDidacticSequence = async (input: SequenceInput, refinementI
   `;
 
   // Lista de modelos priorizada
-  // Usuario indica tener acceso a "gemini-2.5-flash" (posible beta/typo) y "gemini-2.0-flash".
-  // Los agregamos primero. Si fallan (404), el sistema caerá automáticamente a 1.5-flash.
+  // Se ha ajustado la prioridad para usar modelos estables primero y evitar errores 404/429.
   const MODELS = [
-    "gemini-2.5-flash", // User specific request
-    "gemini-2.0-flash", // Standard Next Gen
-    "gemini-2.0-flash-exp", // Experimental
-    "gemini-1.5-flash", // Backup stable
-    "gemini-1.5-pro",
+    "gemini-1.5-flash", // Modelo estable, rápido y con buen tier gratuito
+    "gemini-2.0-flash-exp", // Experimental (rápido pero con límites estrictos)
+    "gemini-1.5-pro", // Más potente, pero más lento
   ];
 
   let lastError;
@@ -225,23 +222,26 @@ export const generateDidacticSequence = async (input: SequenceInput, refinementI
         }
       });
 
-      // Implementamos retry simple para 429 solo en el primer intento si es muy rápido
+      // Implementamos retry robusto
       let result;
+      const makeRequest = async () => await model.generateContent(prompt);
+
       try {
-        result = await model.generateContent(prompt);
+        result = await makeRequest();
       } catch (firstErr: any) {
-        if (firstErr.message && firstErr.message.includes('429')) {
-          console.warn(`Modelo ${modelName} ocupado (429). Esperando 4 segundos para reintentar...`);
-          await wait(4000); // Esperar 4s
-          result = await model.generateContent(prompt);
+        // Manejo específico de cuota excedida (429)
+        if (firstErr.message && (firstErr.message.includes('429') || firstErr.message.includes('quota'))) {
+          console.warn(`Modelo ${modelName} ocupado (429). Esperando 10 segundos para reintentar...`);
+          await wait(10000); // Esperar 10s (el error sugería >40s, pero intentamos 10s primero)
+          result = await makeRequest();
         } else {
-          throw firstErr; // Relanzar si no es 429
+          throw firstErr; // Relanzar otros errores (como 404)
         }
       }
 
       if (result && result.response) {
         let text = result.response.text();
-        // Clenaing markdown artifacts just in case
+        // Cleaning markdown artifacts just in case
         text = text.replace(/```json/g, "").replace(/```/g, "").trim();
         console.log(`¡Éxito con modelo ${modelName}!`);
         return JSON.parse(text) as DidacticSequence;
@@ -250,9 +250,7 @@ export const generateDidacticSequence = async (input: SequenceInput, refinementI
     } catch (err: any) {
       console.warn(`Fallo con modelo ${modelName}:`, err.message || err);
       lastError = err;
-
-      // Si el error es 404 (modelo no encontrado), no tiene sentido reintentar ese modelo, pasamos al siguiente.
-      // Si el error es 429 y ya reintentamos arriba, pasamos al siguiente modelo de la lista.
+      // Continuar al siguiente modelo en la lista
     }
   }
 
